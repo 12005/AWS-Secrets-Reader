@@ -1,135 +1,157 @@
+#!/usr/bin/env python3
 import boto3
-import botocore
-import os
+import getpass
+import jwt  # pip install PyJWT
+from botocore.exceptions import ClientError
 
-def load_credentials(file_path="creds.txt"):
-    creds = {}
+# ---------- CONFIGURATION ----------
+REGION = "ap-south-1"
+USER_POOL_ID = "ap-south-1_"
+CLIENT_ID = ""
+IDENTITY_POOL_ID = "ap-south-1:"
+# ---------- END CONFIG ----------
+
+
+def prompt_credentials():
+    print("\n🔐 AWS Cognito Authentication")
+    username = input("Enter your Cognito username: ").strip()
+    password = getpass.getpass("Enter your password: ")
+    return username, password
+
+
+def cognito_authenticate(username, password):
+    """Authenticate user via Cognito User Pool"""
+    client = boto3.client("cognito-idp", region_name=REGION)
     try:
-        with open(file_path, "r") as f:
-            for line in f:
-                if "=" in line:
-                    key, value = line.strip().split("=", 1)
-                    creds[key.strip()] = value.strip()
-    except FileNotFoundError:
-        print(f"❌ Credential file '{file_path}' not found!")
-        exit(1)
+        resp = client.initiate_auth(
+            AuthFlow="USER_PASSWORD_AUTH",
+            AuthParameters={"USERNAME": username, "PASSWORD": password},
+            ClientId=CLIENT_ID,
+        )
+        print("✅ Cognito authentication successful.")
+        return resp["AuthenticationResult"]
+    except ClientError as e:
+        print(f"❌ Authentication failed: {e.response['Error']['Message']}")
+        return None
+
+
+def decode_token(id_token):
+    """Decode JWT token locally (no signature verification)"""
+    decoded = jwt.decode(id_token, options={"verify_signature": False})
+    return decoded
+
+
+def get_temp_creds(id_token):
+    """Exchange Cognito IdToken for temporary AWS credentials"""
+    cognito_identity = boto3.client("cognito-identity", region_name=REGION)
+    identity = cognito_identity.get_id(
+        IdentityPoolId=IDENTITY_POOL_ID,
+        Logins={f"cognito-idp.{REGION}.amazonaws.com/{USER_POOL_ID}": id_token},
+    )
+    creds = cognito_identity.get_credentials_for_identity(
+        IdentityId=identity["IdentityId"],
+        Logins={f"cognito-idp.{REGION}.amazonaws.com/{USER_POOL_ID}": id_token},
+    )["Credentials"]
+
+    print("✅ Temporary AWS credentials obtained (IAM role applied via role mapping).")
     return creds
 
-def init_base_session(creds):
-    os.environ["AWS_ACCESS_KEY_ID"] = creds["AWS_ACCESS_KEY_ID"]
-    os.environ["AWS_SECRET_ACCESS_KEY"] = creds["AWS_SECRET_ACCESS_KEY"]
-    os.environ["AWS_DEFAULT_REGION"] = creds.get("AWS_REGION", "us-east-1")
-    return boto3.session.Session(
-        aws_access_key_id=creds["AWS_ACCESS_KEY_ID"],
-        aws_secret_access_key=creds["AWS_SECRET_ACCESS_KEY"],
-        region_name=creds.get("AWS_REGION", "us-east-1")
+
+def make_sm_client(creds):
+    """Create a Secrets Manager client using temporary credentials"""
+    return boto3.client(
+        "secretsmanager",
+        region_name=REGION,
+        aws_access_key_id=creds["AccessKeyId"],
+        aws_secret_access_key=creds["SecretKey"],
+        aws_session_token=creds["SessionToken"],
     )
 
-def assume_role_if_specified(base_session, creds):
-    if "ASSUME_ROLE_ARN" not in creds or not creds["ASSUME_ROLE_ARN"].strip():
-        print("ℹ️ No role ARN specified — using static credentials.")
-        return base_session
-    sts_client = base_session.client("sts")
-    try:
-        print(f"🔄 Attempting to assume role: {creds['ASSUME_ROLE_ARN']} ...")
-        response = sts_client.assume_role(
-            RoleArn=creds["ASSUME_ROLE_ARN"],
-            RoleSessionName="secretReaderSession"
-        )
-        creds_sts = response["Credentials"]
-        session = boto3.session.Session(
-            aws_access_key_id=creds_sts["AccessKeyId"],
-            aws_secret_access_key=creds_sts["SecretAccessKey"],
-            aws_session_token=creds_sts["SessionToken"],
-            region_name=creds.get("AWS_REGION", "us-east-1")
-        )
-        print("✅ Role assumed successfully.")
-        return session
-    except botocore.exceptions.ClientError as e:
-        code = e.response["Error"]["Code"]
-        msg = e.response["Error"]["Message"]
-        print("\n❌ Could not assume role!")
-        print("Error Code:", code)
-        print("Reason:", msg)
-        if code == "AccessDenied":
-            print("⚠️ Your IAM user lacks 'sts:AssumeRole' permission for this role.")
-            print("   Check the trust policy and your IAM permissions.")
-        elif code == "NoSuchEntity":
-            print("⚠️ The specified role ARN does not exist.")
-        elif code == "MalformedPolicyDocument":
-            print("⚠️ The role policy might be invalid.")
-        else:
-            print("⚠️ Unexpected error while assuming role.")
-        print("↩️ Reverting to base session with static credentials.\n")
-        return base_session
 
-def list_secrets(client):
-    try:
-        print("\n🔍 Fetching secrets from AWS Secrets Manager...\n")
-        paginator = client.get_paginator("list_secrets")
-        secrets = []
-        index = 1
-        for page in paginator.paginate():
-            for secret in page.get("SecretList", []):
-                print(f"{index}. {secret['Name']}")
-                secrets.append(secret["Name"])
-                index += 1
-        if not secrets:
-            print("ℹ️ No secrets found in this region.")
-        return secrets
-    except botocore.exceptions.ClientError as e:
-        code = e.response["Error"]["Code"]
-        msg = e.response["Error"]["Message"]
-        print("\n❌ Could not list secrets!")
-        print("Error Code:", code)
-        print("Reason:", msg)
-        if code == "AccessDeniedException":
-            print("⚠️ Missing 'secretsmanager:ListSecrets' permission.")
-        return []
-
-def get_secret(client, secret_name):
-    try:
-        response = client.get_secret_value(SecretId=secret_name)
-        print("\n✅ Secret Retrieved Successfully!\n")
-        print("Secret Name:", secret_name)
-        if "SecretString" in response:
-            print("Secret Value:", response["SecretString"])
-        else:
-            print("Binary Secret (Base64 Encoded):", response["SecretBinary"])
-    except botocore.exceptions.ClientError as e:
-        code = e.response["Error"]["Code"]
-        msg = e.response["Error"]["Message"]
-        print("\n❌ Could not retrieve secret!")
-        print("Error Code:", code)
-        print("Reason:", msg)
-        if code == "AccessDeniedException":
-            print("⚠️ Missing 'secretsmanager:GetSecretValue' or 'kms:Decrypt' permission.")
-        elif code == "DecryptionFailure":
-            print("⚠️ KMS decryption failed — check key policy or permissions.")
-        elif code == "ResourceNotFoundException":
-            print("⚠️ Secret not found — check name or region.")
-        else:
-            print("⚠️ Unexpected AWS error occurred.")
-
-def main():
-    creds = load_credentials("creds.txt")
-    base_session = init_base_session(creds)
-    session = assume_role_if_specified(base_session, creds)
-    client = session.client("secretsmanager")
-    secrets = list_secrets(client)
-    if not secrets:
+# --- Secrets Manager Operations --- #
+def create_secret(sm_client, username):
+    name = input("Enter a name for your secret (e.g. 'db-pass'): ").strip()
+    if "/" in name:
+        print("Do not include '/' — it will be prefixed automatically.")
         return
-    choice = input("\nEnter secret name or number to retrieve: ").strip()
-    if choice.isdigit():
-        idx = int(choice) - 1
-        if 0 <= idx < len(secrets):
-            secret_name = secrets[idx]
+    value = getpass.getpass("Enter your secret value: ")
+
+    full_name = f"{username}/{name}"
+    try:
+        resp = sm_client.create_secret(Name=full_name, SecretString=value)
+        print(f"✅ Secret created: {resp['ARN']}")
+    except ClientError as e:
+        print(f"❌ Could not create secret: {e.response['Error']['Message']}")
+
+
+def list_my_secrets(sm_client, username):
+    print("\n📜 Your Secrets:\n")
+    try:
+        paginator = sm_client.get_paginator("list_secrets")
+        found = False
+        for page in paginator.paginate():
+            for s in page.get("SecretList", []):
+                name = s.get("Name", "")
+                if name.startswith(f"{username}/"):
+                    print("-", name)
+                    found = True
+        if not found:
+            print("(no secrets found for your account)")
+    except ClientError as e:
+        print(f"❌ Error listing secrets: {e.response['Error']['Message']}")
+
+
+def view_secret(sm_client, username):
+    secret_name = input("Enter the full secret name to retrieve: ").strip()
+    if not secret_name.startswith(f"{username}/"):
+        print("❌ You can only view secrets that belong to your user prefix.")
+        return
+    try:
+        resp = sm_client.get_secret_value(SecretId=secret_name)
+        print(f"\n🔓 Secret value:\n{resp.get('SecretString')}")
+    except ClientError as e:
+        print(f"❌ Error retrieving secret: {e.response['Error']['Message']}")
+
+
+# --- Main --- #
+def main():
+    print("=== AWS Secrets Manager (Per-User IAM Roles) ===")
+    username, password = prompt_credentials()
+    auth = cognito_authenticate(username, password)
+    if not auth:
+        return
+
+    id_token = auth["IdToken"]
+    decoded = decode_token(id_token)
+    username = decoded.get("cognito:username") or decoded.get("username") or "unknown"
+
+    print(f"👤 Logged in as: {username}")
+
+    creds = get_temp_creds(id_token)
+    sm_client = make_sm_client(creds)
+
+    while True:
+        print("\nSelect an action:")
+        print("1) Create a new secret")
+        print("2) List my secrets")
+        print("3) View a secret value")
+        print("4) Exit")
+        choice = input("Enter choice: ").strip()
+        if choice == "1":
+            create_secret(sm_client, username)
+        elif choice == "2":
+            list_my_secrets(sm_client, username)
+        elif choice == "3":
+            view_secret(sm_client, username)
+        elif choice == "4":
+            print("👋 Exiting...")
+            break
         else:
-            print("❌ Invalid selection.")
-            return
-    else:
-        secret_name = choice
-    get_secret(client, secret_name)
+            print("Invalid choice.")
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n🛑 Operation cancelled by user.")
