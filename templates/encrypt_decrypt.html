@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container mt-5" style="max-width: 900px;">
+  <h2 class="mb-4 text-light">🔐 Encrypt / Decrypt Data</h2>
+
+  <form method="POST">
+    <ul class="nav nav-tabs mb-3" id="modeTab" role="tablist">
+      <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#encrypt" type="button">Encrypt</button></li>
+      <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#decrypt" type="button">Decrypt</button></li>
+      {% if role == 'Admin' %}
+      <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#create" type="button">Create Key</button></li>
+      {% endif %}
+    </ul>
+
+    <div class="tab-content">
+    <!-- Encrypt Tab -->
+      <div class="tab-pane fade show active" id="encrypt">
+        <div class="mb-3">
+          <label class="form-label text-light">Plaintext</label>
+          <textarea name="plaintext" class="form-control bg-dark text-light" rows="4"></textarea>
+        </div>
+
+        <div class="mb-3">
+        <label class="form-label text-light">Select Key</label>
+        <select name="encrypt_key_id" class="form-select bg-dark text-light">
+            <option value="">-- Choose KMS Key --</option>
+            {% for key in keys %}
+            <option value="{{ key.KeyId }}">
+                {{ key.AliasName or key.Description or key.KeyId[:8] }} ({{ key.KeySpec }})
+            </option>
+            {% endfor %}
+        </select>
+        </div>
+
+        <button type="submit" name="action" value="encrypt" class="btn btn-primary">Encrypt</button>
+      </div>
+
+        <!-- Decrypt Tab -->
+        <div class="tab-pane fade" id="decrypt">
+        <div class="mb-3">
+            <label class="form-label text-light">Ciphertext (Base64)</label>
+            <textarea name="ciphertext" class="form-control bg-dark text-light" rows="4"></textarea>
+        </div>
+
+        <div class="mb-3">
+            <label class="form-label text-light">Select Key</label>
+            <select name="decrypt_key_id" class="form-select bg-dark text-light">
+            <option value="">-- Choose KMS Key --</option>
+            {% for key in keys %}
+            <option value="{{ key.KeyId }}">
+                {{ key.AliasName or key.Description or key.KeyId[:8] }} ({{ key.KeySpec }})
+            </option>
+            {% endfor %}
+            </select>
+        </div>
+
+        <button type="submit" name="action" value="decrypt" class="btn btn-success">Decrypt</button>
+        </div>
+
+      <!-- Create Key (Admin Only) -->
+      {% if role == 'Admin' %}
+      <div class="tab-pane fade" id="create">
+        <h5 class="text-light mb-3">Create a New KMS Key</h5>
+
+        <div class="mb-3">
+          <label class="form-label text-light">Description</label>
+          <input type="text" name="description" class="form-control bg-dark text-light" placeholder="e.g., Key for user data encryption">
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label text-light">Key Type</label>
+          <select name="key_type" class="form-select bg-dark text-light">
+            <option value="SYMMETRIC">Symmetric (Encrypt/Decrypt)</option>
+            <option value="ASYMMETRIC_RSA">Asymmetric RSA 2048</option>
+          </select>
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label text-light">Alias (optional)</label>
+          <input type="text" name="alias" class="form-control bg-dark text-light" placeholder="e.g., myapp-key">
+        </div>
+
+        <button type="submit" name="action" value="create_key" class="btn btn-warning">Create Key</button>
+      </div>
+      {% endif %}
+    </div>
+  </form>
+
+  {% if result %}
+  <div class="alert alert-secondary mt-4">
+    <strong>Result:</strong>
+    <textarea class="form-control bg-dark text-light" rows="3" readonly>{{ result }}</textarea>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}
